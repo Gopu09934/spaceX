@@ -1,30 +1,24 @@
 name: Stream
 
 on:
-
   workflow_dispatch:
+  schedule:
+    - cron: "0 */5 * * *"
 
 jobs:
-
   stream:
-
     runs-on: ubuntu-latest
-
     timeout-minutes: 360
 
     steps:
-
       - uses: actions/checkout@v4
 
       - name: Build Docker
-
         run: docker build -t yt-stream ./docker
 
       - name: Start Stream
-
         run: |
-
           docker run \
-          -e GOOGLE_DRIVE_FILE_ID="${{ secrets.GOOGLE_DRIVE_FILE_ID }}" \
-          -e YOUTUBE_STREAM_KEY="${{ secrets.YOUTUBE_STREAM_KEY }}" \
-           yt-stream
+            -e VIDEO_URL="${{ secrets.VIDEO_URL }}" \
+            -e YOUTUBE_STREAM_KEY="${{ secrets.YOUTUBE_STREAM_KEY }}" \
+            yt-stream

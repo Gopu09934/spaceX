@@ -2,139 +2,58 @@
 
 set -euo pipefail
 
-mkdir -p /app/videos
-
-if [ -z "${VIDEO_URLS:-}" ]; then
-    echo "ERROR: VIDEO_URLS secret is empty."
+# Validate required environment variables
+if [ -z "${VIDEO_URL:-}" ]; then
+    echo "ERROR: VIDEO_URL is not set"
     exit 1
 fi
 
-mapfile -t URLS <<< "$VIDEO_URLS"
-
-TOTAL=${#URLS[@]}
-
-if [ "$TOTAL" -eq 0 ]; then
-    echo "No URLs found."
+if [ -z "${YOUTUBE_STREAM_KEY:-}" ]; then
+    echo "ERROR: YOUTUBE_STREAM_KEY is not set"
     exit 1
 fi
 
-echo "Found $TOTAL videos."
+echo "========================================"
+echo "Starting 24/7 YouTube Stream..."
+echo "========================================"
 
-download_video() {
+# Split multiple URLs (comma-separated)
+IFS=',' read -ra URLS <<< "$VIDEO_URL"
 
-    local url="$1"
-    local outfile="$2"
+# Loop forever
+while true; do
+    for url in "${URLS[@]}"; do
 
-    echo ""
-    echo "========================================"
-    echo "Downloading:"
-    echo "$url"
+        echo "----------------------------------------"
+        echo "Streaming: $url"
+        echo "----------------------------------------"
 
-    for attempt in 1 2 3
-    do
+        ffmpeg \
+            -hide_banner \
+            -loglevel info \
+            -re \
+            -i "$url" \
+            -vf "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2" \
+            -r 30 \
+            -c:v libx264 \
+            -preset ultrafast \
+            -tune zerolatency \
+            -pix_fmt yuv420p \
+            -b:v 3000k \
+            -maxrate 3000k \
+            -bufsize 6000k \
+            -g 60 \
+            -keyint_min 60 \
+            -c:a aac \
+            -b:a 128k \
+            -ar 44100 \
+            -ac 2 \
+            -f flv \
+            "rtmp://a.rtmp.youtube.com/live2/${YOUTUBE_STREAM_KEY}" || true
 
-        if curl \
-            -L \
-            --fail \
-            --retry 5 \
-            --retry-delay 5 \
-            -o "$outfile" \
-            "$url"
-        then
-
-            if ffprobe -v error "$outfile" >/dev/null
-            then
-                echo "Download OK."
-                return 0
-            fi
-
-        fi
-
-        echo "Download failed. Retry $attempt/3"
+        echo "Finished: $url"
+        echo "Waiting 5 seconds before next video..."
         sleep 5
 
     done
-
-    echo "Giving up."
-
-    return 1
-}
-
-current=0
-
-while ! download_video "${URLS[$current]}" "/app/videos/current.mp4"
-do
-    current=$(( (current + 1) % TOTAL ))
-done
-
-while true
-do
-
-    next=$(( (current + 1) % TOTAL ))
-
-    (
-        download_video "${URLS[$next]}" "/app/videos/next.mp4"
-    ) &
-
-    DOWNLOAD_PID=$!
-
-    echo ""
-    echo "========================================"
-    echo "Streaming:"
-    echo "${URLS[$current]}"
-
-    ffmpeg \
-        -hide_banner \
-        -loglevel info \
-        -re \
-        -i /app/videos/current.mp4 \
-        -c:v libx264 \
-        -preset ultrafast \
-        -pix_fmt yuv420p \
-        -c:a aac \
-        -b:a 128k \
-        -f flv \
-        "rtmp://a.rtmp.youtube.com/live2/${YOUTUBE_STREAM_KEY}"
-
-    if wait "$DOWNLOAD_PID"
-    then
-
-        rm -f /app/videos/current.mp4
-        mv /app/videos/next.mp4 /app/videos/current.mp4
-        current=$next
-
-    else
-
-        echo ""
-        echo "Background download failed."
-
-        found=0
-
-        for ((i=1;i<TOTAL;i++))
-        do
-
-            idx=$(( (current + i) % TOTAL ))
-
-            if download_video "${URLS[$idx]}" "/app/videos/current.mp4"
-            then
-                current=$idx
-                found=1
-                break
-            fi
-
-        done
-
-        if [ "$found" -eq 0 ]
-        then
-
-            echo "No downloadable videos."
-
-            echo "Sleeping 60 seconds..."
-
-            sleep 60
-
-        fi
-
-    fi
-
 done

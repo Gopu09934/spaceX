@@ -29,27 +29,34 @@ while true; do
         echo "----------------------------------------"
 
         ffmpeg \
-            -hide_banner \
-            -loglevel info \
-            -re \
-            -i "$url" \
-            -vf "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2" \
-            -r 30 \
-            -c:v libx264 \
-            -preset ultrafast \
-            -tune zerolatency \
-            -pix_fmt yuv420p \
-            -b:v 3000k \
-            -maxrate 3000k \
-            -bufsize 6000k \
-            -g 60 \
-            -keyint_min 60 \
-            -c:a aac \
-            -b:a 128k \
-            -ar 44100 \
-            -ac 2 \
-            -f flv \
-            "rtmp://a.rtmp.youtube.com/live2/${YOUTUBE_STREAM_KEY}" || true
+-hide_banner \
+-loglevel info \
+-re \
+-i "$url" \
+-loop 1 -i overlay.png \
+-filter_complex "\
+[0:v]scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2[video];\
+[1:v]scale=1080:720[overlay];\
+[video][overlay]overlay=0:0,\
+drawtext=fontfile=font.ttf:text='LIVE':fontcolor=red:fontsize=32:x=40:y=35,\
+drawtext=fontfile=font.ttf:text='Credits\: NASA / SpaceX':fontcolor=white:fontsize=24:x=w-text_w-20:y=20" \
+-r 30 \
+-c:v libx264 \
+-preset ultrafast \
+-tune zerolatency \
+-pix_fmt yuv420p \
+-b:v 3000k \
+-maxrate 3000k \
+-bufsize 6000k \
+-g 60 \
+-keyint_min 60 \
+-c:a aac \
+-b:a 128k \
+-ar 44100 \
+-ac 2 \
+-shortest \
+-f flv \
+"rtmp://a.rtmp.youtube.com/live2/${YOUTUBE_STREAM_KEY}"
 
         echo "Finished: $url"
         echo "Waiting 5 seconds before next video..."

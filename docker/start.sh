@@ -2,7 +2,10 @@
 
 set -euo pipefail
 
-# Validate required environment variables
+#############################################
+# Validate Environment Variables
+#############################################
+
 if [ -z "${VIDEO_URL:-}" ]; then
     echo "ERROR: VIDEO_URL is not set"
     exit 1
@@ -14,52 +17,65 @@ if [ -z "${YOUTUBE_STREAM_KEY:-}" ]; then
 fi
 
 echo "========================================"
-echo "Starting 24/7 YouTube Stream..."
+echo "Starting 24/7 YouTube Stream"
+echo "Output Resolution : 1920x1080"
+echo "FPS               : 30"
 echo "========================================"
 
-# Split multiple URLs (comma-separated)
+# Multiple video URLs separated by commas
 IFS=',' read -ra URLS <<< "$VIDEO_URL"
 
-# Loop forever
 while true; do
     for url in "${URLS[@]}"; do
 
         echo "----------------------------------------"
-        echo "Streaming: $url"
+        echo "Streaming:"
+        echo "$url"
         echo "----------------------------------------"
 
         ffmpeg \
--hide_banner \
--loglevel info \
--re \
--i "$url" \
--loop 1 -i overlay.png \
--filter_complex "\
-[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2[video];\
-[1:v]scale=1920:1080[overlay];\
-[video][overlay]overlay=0:0,\
-drawtext=fontfile=font.ttf:text='LIVE':fontcolor=red:fontsize=32:x=40:y=35,\
-drawtext=fontfile=font.ttf:text='Credits\: NASA / SpaceX':fontcolor=white:fontsize=24:x=w-text_w-20:y=20" \
--r 30 \
--c:v libx264 \
--preset ultrafast \
--tune zerolatency \
--pix_fmt yuv420p \
--b:v 3000k \
--maxrate 3000k \
--bufsize 6000k \
--g 60 \
--keyint_min 60 \
--c:a aac \
--b:a 128k \
--ar 44100 \
--ac 2 \
--shortest \
--f flv \
-"rtmp://a.rtmp.youtube.com/live2/${YOUTUBE_STREAM_KEY}"
+        -hide_banner \
+        -loglevel info \
+        -re \
+        -i "$url" \
+        -loop 1 -i overlay.png \
+        -filter_complex "\
+        [0:v]scale=1920:1080:force_original_aspect_ratio=decrease,\
+        pad=1920:1080:(ow-iw)/2:(oh-ih)/2:black[video];\
+        [1:v]scale=1920:1080:flags=lanczos[overlay];\
+        [video][overlay]overlay=0:0,\
+        drawtext=fontfile=font.ttf:text='LIVE':\
+        fontcolor=red:fontsize=34:x=40:y=35,\
+        drawtext=fontfile=font.ttf:\
+        text='Credits\: NASA / SpaceX':\
+        fontcolor=white:fontsize=24:\
+        x=w-text_w-30:y=25" \
+        -r 30 \
+        -s 1920x1080 \
+        -c:v libx264 \
+        -preset veryfast \
+        -profile:v high \
+        -level 4.2 \
+        -pix_fmt yuv420p \
+        -b:v 6000k \
+        -maxrate 6000k \
+        -bufsize 12000k \
+        -g 60 \
+        -keyint_min 60 \
+        -sc_threshold 0 \
+        -c:a aac \
+        -b:a 160k \
+        -ar 48000 \
+        -ac 2 \
+        -shortest \
+        -f flv \
+        "rtmp://a.rtmp.youtube.com/live2/${YOUTUBE_STREAM_KEY}"
 
-        echo "Finished: $url"
-        echo "Waiting 5 seconds before next video..."
+        echo ""
+        echo "Video Finished."
+        echo "Loading next video in 5 seconds..."
+        echo ""
+
         sleep 5
 
     done

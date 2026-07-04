@@ -43,7 +43,7 @@ while true; do
         [0:v]scale=1920:1080:force_original_aspect_ratio=decrease,\
         pad=1920:1080:(ow-iw)/2:(oh-ih)/2:black[video];\
         [1:v]scale=1920:1080:flags=lanczos[overlay];\
-        [video][overlay]overlay=0:0,\
+        [overlay][video]overlay=0:0,\
         drawtext=fontfile=font.ttf:text='LIVE':\
         fontcolor=red:fontsize=34:x=40:y=35,\
         drawtext=fontfile=font.ttf:\

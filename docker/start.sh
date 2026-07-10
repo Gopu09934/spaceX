@@ -13,28 +13,8 @@ if [ -z "${YOUTUBE_STREAM_KEY:-}" ]; then
     exit 1
 fi
 
-#############################################
-# Audio controls
-#   - ENABLE_SRC_AUDIO / SRC_AUDIO_VOLUME control the video's OWN sound
-#   - BACKGROUND_AUDIO / BG_AUDIO_VOLUME control an optional music bed
-#   - Any combination works: video only, music only, both mixed, or muted
-#############################################
-ENABLE_SRC_AUDIO="${ENABLE_SRC_AUDIO:-false}"     # true/false — include the video's own audio at all
-SRC_AUDIO_VOLUME="${SRC_AUDIO_VOLUME:-1.0}"      # relative volume of the video's own audio
-
-BACKGROUND_AUDIO="${BACKGROUND_AUDIO:-}"
-BG_AUDIO_VOLUME="${BG_AUDIO_VOLUME:-0.25}"       # relative volume of the music bed
-
-echo "Video's own audio        : $ENABLE_SRC_AUDIO (volume ${SRC_AUDIO_VOLUME})"
-if [ -n "$BACKGROUND_AUDIO" ]; then
-    echo "Background audio enabled : $BACKGROUND_AUDIO"
-    echo "Background audio volume  : $BG_AUDIO_VOLUME"
-else
-    echo "Background audio         : disabled"
-fi
-
 echo "========================================"
-echo "Starting 24/7 YouTube Stream (spacex)"
+echo "Starting 24/7 YouTube Stream (Documentary Overlay)"
 echo "Output Resolution : 1920x1080"
 echo "FPS               : 30"
 echo "========================================"
@@ -53,10 +33,10 @@ TICKER_SPEED=110  # pixels/second for the bottom ticker scroll
 ENABLE_BUMPER=true
 BUMPER_DURATION=5   # seconds
 BUMPER_MESSAGES=(
-    "Stay tuned for the next SpaceX mission"
-    "Another exciting launch is coming up"
-    "Preparing for the next mission update"
-    "Exploring the future of spaceflight"
+    "Stay tuned for more cosmic wonders"
+    "Another journey through deep space is coming up"
+    "More discoveries from the edge of the universe"
+    "The story of the cosmos continues"
 )
 
 #############################################
@@ -356,68 +336,6 @@ run_video() {
     local url="$1"
     local attempt=1
 
-    # Decide how to handle audio for this video (probed once, not per retry)
-    local input_args=(-re -i "$url" -loop 1 -i overlay.png)
-    local filter_args=("$FILTER")
-    local map_args=(-map "[final]")
-    local next_idx=2   # 0=video, 1=overlay.png, next free input index
-
-    # Only probe when we actually need to know if the source has audio —
-    # skip it in the simple default case (own audio on, no background,
-    # volume untouched) to avoid an extra network round-trip per video.
-    local vol_is_default
-    vol_is_default=$(awk -v v="$SRC_AUDIO_VOLUME" 'BEGIN{print (v==1)?"true":"false"}')
-
-    local src_present="false"
-    if [ "$ENABLE_SRC_AUDIO" = "true" ]; then
-        if [ -n "$BACKGROUND_AUDIO" ] || [ "$vol_is_default" = "false" ]; then
-            local has_src_audio="false"
-            if command -v ffprobe >/dev/null 2>&1; then
-                if ffprobe -v error -select_streams a -show_entries stream=index \
-                    -of csv=p=0 "$url" 2>/dev/null | grep -q .; then
-                    has_src_audio="true"
-                fi
-            else
-                echo "WARNING: ffprobe not found, assuming source has no audio track."
-            fi
-            src_present="$has_src_audio"
-        else
-            # Default case: keep the original cheap passthrough behavior.
-            src_present="passthrough"
-        fi
-    fi
-
-    local bg_idx=""
-    if [ -n "$BACKGROUND_AUDIO" ]; then
-        input_args+=(-stream_loop -1 -i "$BACKGROUND_AUDIO")
-        bg_idx=$next_idx
-        next_idx=$((next_idx + 1))
-    fi
-
-    if [ "$src_present" = "passthrough" ]; then
-        # Own audio only, default volume, no background — original simple path.
-        map_args+=(-map 0:a?)
-    elif [ "$src_present" = "true" ] && [ -n "$bg_idx" ]; then
-        # Mix video's own audio with background music.
-        filter_args=("${FILTER};[0:a]volume=${SRC_AUDIO_VOLUME}[va];[${bg_idx}:a]volume=${BG_AUDIO_VOLUME}[vb];[va][vb]amix=inputs=2:duration=first:dropout_transition=3[aout]")
-        map_args+=(-map "[aout]")
-    elif [ "$src_present" = "true" ]; then
-        # Own audio only, custom volume, no background.
-        filter_args=("${FILTER};[0:a]volume=${SRC_AUDIO_VOLUME}[aout]")
-        map_args+=(-map "[aout]")
-    elif [ -n "$bg_idx" ]; then
-        # Background music only (own audio disabled or source has none).
-        filter_args=("${FILTER};[${bg_idx}:a]volume=${BG_AUDIO_VOLUME}[aout]")
-        map_args+=(-map "[aout]")
-    else
-        # Both disabled/unavailable — feed a silent track so YouTube always
-        # gets a valid audio stream instead of erroring on a missing one.
-        input_args+=(-f lavfi -i "anullsrc=r=48000:cc=2")
-        local silent_idx=$next_idx
-        next_idx=$((next_idx + 1))
-        map_args+=(-map "${silent_idx}:a")
-    fi
-
     while [ "$attempt" -le "$MAX_RETRIES" ]; do
         echo "----------------------------------------"
         echo "Streaming (attempt ${attempt}/${MAX_RETRIES}):"
@@ -428,9 +346,12 @@ run_video() {
         ffmpeg \
         -hide_banner \
         -loglevel info \
-        "${input_args[@]}" \
-        -filter_complex "${filter_args[0]}" \
-        "${map_args[@]}" \
+        -re \
+        -i "$url" \
+        -loop 1 -i overlay.png \
+        -filter_complex "$FILTER" \
+        -map "[final]" \
+        -map 0:a? \
         -r 30 \
         -s 1920x1080 \
         -c:v libx264 \

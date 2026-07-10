@@ -11,14 +11,17 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      - name: Build Docker
-        run: docker build -t yt-stream ./docker
+      - name: Build Docker image
+        run: |
+          docker build -t yt-stream ./docker
 
-      - name: Start Stream
+      - name: Start YouTube Stream
         run: |
           docker run \
             -e VIDEO_URL="${{ secrets.VIDEO_URL }}" \
+            -e BACKGROUND_AUDIO="${{ secrets.BACKGROUND_AUDIO }}" \
             -e YOUTUBE_STREAM_KEY="${{ secrets.YOUTUBE_STREAM_KEY }}" \
             yt-stream

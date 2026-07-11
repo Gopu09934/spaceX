@@ -24,6 +24,8 @@ GOLD="0xE8A33D"
 RED="0xE8453C"
 ASSET_DIR="panel_assets"
 INFO_FILE="galaxy_info.txt"
+SLOT=6            # seconds each headline is shown
+FACT_SLOT=8       # seconds each fun fact is shown
 TICKER_SPEED=110  # pixels/second for the bottom ticker scroll
 
 #############################################
@@ -62,6 +64,14 @@ CLOCK_PID=$!
 trap 'kill "$CLOCK_PID" 2>/dev/null || true' EXIT
 
 #############################################
+# Static panel text
+#############################################
+printf 'S P A C E X'                     > "$ASSET_DIR/title1.txt"
+printf 'L A U N C H   M I S S I O N S'   > "$ASSET_DIR/title2.txt"
+printf "T O D A Y ' S   M I S S I O N"   > "$ASSET_DIR/header.txt"
+printf 'MISSION REPORT'                  > "$ASSET_DIR/eyebrow.txt"
+
+#############################################
 # Load headlines from galaxy_info.txt
 # (still used to build the bottom ticker text)
 #############################################
@@ -83,7 +93,14 @@ if [ "${#RAW_LINES[@]}" -eq 0 ]; then
 fi
 
 N=${#RAW_LINES[@]}
-echo "Loaded $N headline(s) from $INFO_FILE for ticker"
+CYCLE=$((N * SLOT))
+echo "Loaded $N headline(s) from $INFO_FILE — rotation cycle: ${CYCLE}s"
+
+# Wrap each headline for the side panel (narrower panel at 720p -> tighter fold width)
+for i in "${!RAW_LINES[@]}"; do
+    idx=$((i + 1))
+    echo "${RAW_LINES[$i]}" | fold -s -w 20 > "$ASSET_DIR/headline${idx}.txt"
+done
 
 # Build one long ticker string for the bottom scroll bar
 TICKER_STRING=""
@@ -91,6 +108,32 @@ for i in "${!RAW_LINES[@]}"; do
     TICKER_STRING+="${RAW_LINES[$i]}     •     "
 done
 printf '%s' "$TICKER_STRING" > "$ASSET_DIR/ticker.txt"
+
+#############################################
+# Fun facts (fills empty space + adds motion)
+# Optional file: facts.txt, one fact per line.
+#############################################
+FACTS=()
+if [ -f "facts.txt" ]; then
+    while IFS= read -r line; do
+        [ -n "$(echo "$line" | tr -d '[:space:]')" ] && FACTS+=("$line")
+    done < "facts.txt"
+fi
+if [ "${#FACTS[@]}" -eq 0 ]; then
+    FACTS=(
+    "Falcon 9 first stages routinely land and fly multiple missions."
+    "Dragon is the first private spacecraft to carry astronauts to the ISS."
+    "Starship is the world's largest and most powerful launch vehicle."
+    "SpaceX aims to make life multiplanetary through reusable rockets."
+)
+fi
+FACT_N=${#FACTS[@]}
+FACT_CYCLE=$((FACT_N * FACT_SLOT))
+for i in "${!FACTS[@]}"; do
+    idx=$((i + 1))
+    echo "${FACTS[$i]}" | fold -s -w 23 > "$ASSET_DIR/fact${idx}.txt"
+done
+printf 'DID YOU KNOW' > "$ASSET_DIR/fact_label.txt"
 
 #############################################
 # Build the filter_complex dynamically
@@ -104,15 +147,93 @@ CHAIN="[0:v]scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow
 CHAIN+="[1:v]scale=1280:720:flags=fast_bilinear[ovl];"
 CHAIN+="[ovl][video]overlay=0:0[base];"
 
+# --- left info panel with feathered (gradient-style) edge -----------------
+# NOTE: scaled to 333px wide (was 500px at 1080p) to match the 1280x720 frame.
+CHAIN+="[base]drawbox=x=0:y=0:w=333:h=720:color=black@0.60:t=fill[p1];"
+CHAIN+="[p1]drawbox=x=333:y=0:w=4:h=720:color=black@0.45:t=fill[p2];"
+CHAIN+="[p2]drawbox=x=337:y=0:w=4:h=720:color=black@0.30:t=fill[p3];"
+CHAIN+="[p3]drawbox=x=341:y=0:w=4:h=720:color=black@0.15:t=fill[p4];"
+CHAIN+="[p4]drawbox=x=0:y=0:w=347:h=4:color=${GOLD}@0.9:t=fill[p5];"
+CHAIN+="[p5]drawbox=x=345:y=0:w=2:h=720:color=${GOLD}@0.6:t=fill[p6];"
+
 # --- LIVE indicator: steady label + blinking dot ---------------------------
-CHAIN+="[base]drawbox=x=27:y=28:w=11:h=11:color=${RED}:t=fill:enable='lt(mod(t\,1)\,0.6)'[p7];"
+CHAIN+="[p6]drawbox=x=27:y=28:w=11:h=11:color=${RED}:t=fill:enable='lt(mod(t\,1)\,0.6)'[p7];"
 CHAIN+="[p7]drawtext=fontfile=${FONT}:text='LIVE':fontcolor=white:fontsize=30:x=44:y=19[p8];"
 
 # --- credits + live UTC clock ----------------------------------------------
 CHAIN+="[p8]drawtext=fontfile=${FONT}:text='Credits\: NASA':fontcolor=white@0.85:fontsize=20:x=w-text_w-20:y=14[p9];"
 CHAIN+="[p9]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/clock.txt:reload=1:fontcolor=${GOLD}:fontsize=19:x=w-text_w-20:y=39[p10];"
 
-prev="p10"
+# --- titles ------------------------------------------------------------
+CHAIN+="[p10]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/title1.txt:fontcolor=white:fontsize=23:x=33:y=83[p11];"
+CHAIN+="[p11]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/title2.txt:fontcolor=white@0.85:fontsize=17:x=33:y=112[p12];"
+CHAIN+="[p12]drawbox=x=33:y=143:w=280:h=2:color=white@0.3:t=fill[p13];"
+
+# --- section header ----------------------------------------------------
+CHAIN+="[p13]drawbox=x=33:y=159:w=8:h=8:color=${GOLD}:t=fill[p14];"
+CHAIN+="[p14]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/header.txt:fontcolor=${GOLD}:fontsize=15:x=49:y=156[p15];"
+
+# --- eyebrow category tag above the rotating headline -----------------
+CHAIN+="[p15]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/eyebrow.txt:fontcolor=${GOLD}@0.85:fontsize=12:x=33:y=187[p16];"
+
+prev="p16"
+for i in "${!RAW_LINES[@]}"; do
+    idx=$((i + 1))
+    start=$((i * SLOT))
+    end=$((start + SLOT))
+    nxt="h${idx}"
+    ALPHA="if(between(mod(t\,${CYCLE})\,${start}\,${end})\,if(lt(mod(t\,${CYCLE})-${start}\,0.6)\,(mod(t\,${CYCLE})-${start})/0.6\,if(gt(mod(t\,${CYCLE})-${start}\,${SLOT}-0.6)\,(${end}-mod(t\,${CYCLE}))/0.6\,1))\,0)"
+    CHAIN+="[${prev}]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/headline${idx}.txt:fontcolor=white:fontsize=21:line_spacing=9:x=33:y=207:alpha='${ALPHA}'[${nxt}];"
+    prev="$nxt"
+done
+
+# --- animated progress bar: fills across current headline's time slot -----
+CHAIN+="[${prev}]drawbox=x=33:y=313:w=280:h=2:color=white@0.15:t=fill[pg1];"
+CHAIN+="[pg1]drawbox=x=33:y=313:w='280*(mod(t\,${SLOT}))/${SLOT}':h=2:color=${GOLD}:t=fill[pg2];"
+prev="pg2"
+
+# --- background dots (dim) -------------------------------------------------
+for i in "${!RAW_LINES[@]}"; do
+    idx=$((i + 1))
+    x=$((33 + i * 17))
+    nxt="db${idx}"
+    CHAIN+="[${prev}]drawbox=x=${x}:y=333:w=7:h=7:color=white@0.3:t=fill[${nxt}];"
+    prev="$nxt"
+done
+
+# --- active dot (gold, toggled per slot) -----------------------------------
+last=$((N - 1))
+for i in "${!RAW_LINES[@]}"; do
+    idx=$((i + 1))
+    x=$((33 + i * 17))
+    start=$((i * SLOT))
+    end=$((start + SLOT))
+    ENABLE="between(mod(t\,${CYCLE})\,${start}\,${end})"
+    if [ "$i" -eq "$last" ]; then
+        CHAIN+="[${prev}]drawbox=x=${x}:y=333:w=7:h=7:color=${GOLD}:t=fill:enable='${ENABLE}'[pdotend];"
+        prev="pdotend"
+    else
+        nxt="da${idx}"
+        CHAIN+="[${prev}]drawbox=x=${x}:y=333:w=7:h=7:color=${GOLD}:t=fill:enable='${ENABLE}'[${nxt}];"
+        prev="$nxt"
+    fi
+done
+
+# --- rotating fun fact (fills empty space, adds periodic motion) ----------
+CHAIN+="[${prev}]drawbox=x=33:y=373:w=280:h=2:color=${GOLD}@0.4:t=fill[fp1];"
+CHAIN+="[fp1]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/fact_label.txt:fontcolor=${GOLD}@0.85:fontsize=12:x=33:y=387[fp2];"
+prev="fp2"
+for i in "${!FACTS[@]}"; do
+    idx=$((i + 1))
+    start=$((i * FACT_SLOT))
+    end=$((start + FACT_SLOT))
+    nxt="f${idx}"
+    FALPHA="if(between(mod(t\,${FACT_CYCLE})\,${start}\,${end})\,if(lt(mod(t\,${FACT_CYCLE})-${start}\,0.6)\,(mod(t\,${FACT_CYCLE})-${start})/0.6\,if(gt(mod(t\,${FACT_CYCLE})-${start}\,${FACT_SLOT}-0.6)\,(${end}-mod(t\,${FACT_CYCLE}))/0.6\,1))\,0)"
+    CHAIN+="[${prev}]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/fact${idx}.txt:fontcolor=white@0.9:fontsize=16:line_spacing=7:x=33:y=407:alpha='${FALPHA}'[${nxt}];"
+    prev="$nxt"
+done
+
+prev="$prev"
 
 # --- periodic subscribe CTA (fades in every 4 min for 8s) -----------------
 CTA_CYCLE=240   # total cycle length in seconds

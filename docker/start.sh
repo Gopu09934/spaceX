@@ -15,7 +15,7 @@ fi
 
 echo "========================================"
 echo "Starting 24/7 YouTube Stream (Documentary Overlay)"
-echo "Output Resolution : 1920x1080"
+echo "Output Resolution : 1280x720 (720p — sized for a 2-core CI runner)"
 echo "FPS               : 30"
 echo "========================================"
 
@@ -96,18 +96,21 @@ printf '%s' "$TICKER_STRING" > "$ASSET_DIR/ticker.txt"
 # Build the filter_complex dynamically
 #############################################
 
-# --- base video + vignette + background art -------------------------------
-CHAIN="[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2:black,vignette=PI/5,eq=contrast=1.08:saturation=1.15:brightness=0.02[video];"
-CHAIN+="[1:v]scale=1920:1080:flags=lanczos[ovl];"
+# --- base video + background art -------------------------------
+# NOTE: vignette + eq removed — too expensive for a 2-core CI runner.
+# NOTE: resolution dropped to 1280x720 — 1080p30 is not realtime-encodable
+# on 2 vCPUs with this filter graph, regardless of preset.
+CHAIN="[0:v]scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2:black[video];"
+CHAIN+="[1:v]scale=1280:720:flags=fast_bilinear[ovl];"
 CHAIN+="[ovl][video]overlay=0:0[base];"
 
 # --- LIVE indicator: steady label + blinking dot ---------------------------
-CHAIN+="[base]drawbox=x=40:y=42:w=16:h=16:color=${RED}:t=fill:enable='lt(mod(t\,1)\,0.6)'[p7];"
-CHAIN+="[p7]drawtext=fontfile=${FONT}:text='LIVE':fontcolor=white:fontsize=44:x=66:y=28[p8];"
+CHAIN+="[base]drawbox=x=27:y=28:w=11:h=11:color=${RED}:t=fill:enable='lt(mod(t\,1)\,0.6)'[p7];"
+CHAIN+="[p7]drawtext=fontfile=${FONT}:text='LIVE':fontcolor=white:fontsize=30:x=44:y=19[p8];"
 
 # --- credits + live UTC clock ----------------------------------------------
-CHAIN+="[p8]drawtext=fontfile=${FONT}:text='Credits\: NASA':fontcolor=white@0.85:fontsize=30:x=w-text_w-30:y=20[p9];"
-CHAIN+="[p9]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/clock.txt:reload=1:fontcolor=${GOLD}:fontsize=28:x=w-text_w-30:y=58[p10];"
+CHAIN+="[p8]drawtext=fontfile=${FONT}:text='Credits\: NASA':fontcolor=white@0.85:fontsize=20:x=w-text_w-20:y=14[p9];"
+CHAIN+="[p9]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/clock.txt:reload=1:fontcolor=${GOLD}:fontsize=19:x=w-text_w-20:y=39[p10];"
 
 prev="p10"
 
@@ -119,22 +122,22 @@ CTA_END=$CTA_SHOW
 CTA_ALPHA="if(between(mod(t\,${CTA_CYCLE})\,${CTA_START}\,${CTA_END})\,if(lt(mod(t\,${CTA_CYCLE})-${CTA_START}\,0.6)\,(mod(t\,${CTA_CYCLE})-${CTA_START})/0.6\,if(gt(mod(t\,${CTA_CYCLE})-${CTA_START}\,${CTA_SHOW}-0.6)\,(${CTA_END}-mod(t\,${CTA_CYCLE}))/0.6\,1))\,0)"
 CTA_ENABLE="between(mod(t\,${CTA_CYCLE})\,${CTA_START}\,${CTA_END})"
 printf 'SUBSCRIBE for daily space discoveries' > "$ASSET_DIR/cta.txt"
-CHAIN+="[${prev}]drawbox=x=1100:y=930:w=760:h=64:color=black@0.75:t=fill:enable='${CTA_ENABLE}'[cta1];"
-CHAIN+="[cta1]drawbox=x=1100:y=930:w=6:h=64:color=${GOLD}:t=fill:enable='${CTA_ENABLE}'[cta2];"
-CHAIN+="[cta2]drawbox=x=1132:y=954:w=16:h=16:color=${RED}:t=fill:enable='${CTA_ENABLE}'[cta3];"
-CHAIN+="[cta3]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/cta.txt:fontcolor=white:fontsize=28:x=1160:y=950:alpha='${CTA_ALPHA}'[cta4];"
+CHAIN+="[${prev}]drawbox=x=733:y=620:w=507:h=43:color=black@0.75:t=fill:enable='${CTA_ENABLE}'[cta1];"
+CHAIN+="[cta1]drawbox=x=733:y=620:w=4:h=43:color=${GOLD}:t=fill:enable='${CTA_ENABLE}'[cta2];"
+CHAIN+="[cta2]drawbox=x=755:y=636:w=11:h=11:color=${RED}:t=fill:enable='${CTA_ENABLE}'[cta3];"
+CHAIN+="[cta3]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/cta.txt:fontcolor=white:fontsize=19:x=773:y=633:alpha='${CTA_ALPHA}'[cta4];"
 prev="cta4"
 
 # --- bottom ticker bar -------------------------------------------------
-CHAIN+="[${prev}]drawbox=x=0:y=1020:w=1920:h=60:color=black@0.72:t=fill[tk1];"
-CHAIN+="[tk1]drawbox=x=0:y=1020:w=1920:h=3:color=${GOLD}@0.9:t=fill[tk2];"
-CHAIN+="[tk2]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/ticker.txt:fontcolor=white:fontsize=26:borderw=2:bordercolor=black@0.6:y=1043:x='w-mod(t*${TICKER_SPEED}\,text_w+w)'[tk3];"
-CHAIN+="[tk3]drawbox=x=0:y=1020:w=180:h=60:color=black@0.85:t=fill[tk4];"
-CHAIN+="[tk4]drawbox=x=0:y=1023:w=170:h=57:color=${GOLD}:t=fill[tk5];"
-CHAIN+="[tk5]drawtext=fontfile=${FONT}:text='BULLETIN':fontcolor=black:fontsize=24:x=25:y=1043[tk6];"
+CHAIN+="[${prev}]drawbox=x=0:y=680:w=1280:h=40:color=black@0.72:t=fill[tk1];"
+CHAIN+="[tk1]drawbox=x=0:y=680:w=1280:h=2:color=${GOLD}@0.9:t=fill[tk2];"
+CHAIN+="[tk2]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/ticker.txt:fontcolor=white:fontsize=17:borderw=2:bordercolor=black@0.6:y=695:x='w-mod(t*${TICKER_SPEED}\,text_w+w)'[tk3];"
+CHAIN+="[tk3]drawbox=x=0:y=680:w=120:h=40:color=black@0.85:t=fill[tk4];"
+CHAIN+="[tk4]drawbox=x=0:y=682:w=113:h=38:color=${GOLD}:t=fill[tk5];"
+CHAIN+="[tk5]drawtext=fontfile=${FONT}:text='BULLETIN':fontcolor=black:fontsize=16:x=17:y=695[tk6];"
 
 # --- outer frame border -------------------------------------------------
-CHAIN+="[tk6]drawbox=x=0:y=0:w=1920:h=1080:color=black@0.5:t=2[final]"
+CHAIN+="[tk6]drawbox=x=0:y=0:w=1280:h=720:color=black@0.5:t=2[final]"
 
 FILTER="$CHAIN"
 
@@ -171,14 +174,14 @@ run_bumper() {
     fade_out_start=$(awk -v d="$BUMPER_DURATION" 'BEGIN{print d - 0.6}')
 
     local BFILTER
-    BFILTER="[0:v]scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,eq=brightness=-0.08:saturation=0.85[bg];"
-    BFILTER+="[bg]drawbox=x=0:y=0:w=1920:h=1080:color=black@0.55:t=fill[b1];"
-    BFILTER+="[b1]drawbox=x=40:y=42:w=16:h=16:color=${RED}:t=fill:enable='lt(mod(t\,1)\,0.6)'[b2];"
-    BFILTER+="[b2]drawtext=fontfile=${FONT}:text='LIVE':fontcolor=white:fontsize=44:x=66:y=28[b3];"
-    BFILTER+="[b3]drawbox=x=0:y=470:w=1920:h=3:color=${GOLD}@0.8:t=fill[b4];"
-    BFILTER+="[b4]drawtext=fontfile=${FONT}:text='UP NEXT':fontcolor=${GOLD}:fontsize=32:x=(w-text_w)/2:y=390[b5];"
-    BFILTER+="[b5]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/bumper_title.txt:fontcolor=white:fontsize=54:line_spacing=10:x=(w-text_w)/2:y=520[b6];"
-    BFILTER+="[b6]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/bumper_sub.txt:fontcolor=white@0.75:fontsize=26:x=(w-text_w)/2:y=640[b7];"
+    BFILTER="[0:v]scale=1280:720:force_original_aspect_ratio=increase,crop=1280:720[bg];"
+    BFILTER+="[bg]drawbox=x=0:y=0:w=1280:h=720:color=black@0.55:t=fill[b1];"
+    BFILTER+="[b1]drawbox=x=27:y=28:w=11:h=11:color=${RED}:t=fill:enable='lt(mod(t\,1)\,0.6)'[b2];"
+    BFILTER+="[b2]drawtext=fontfile=${FONT}:text='LIVE':fontcolor=white:fontsize=30:x=44:y=19[b3];"
+    BFILTER+="[b3]drawbox=x=0:y=313:w=1280:h=2:color=${GOLD}@0.8:t=fill[b4];"
+    BFILTER+="[b4]drawtext=fontfile=${FONT}:text='UP NEXT':fontcolor=${GOLD}:fontsize=22:x=(w-text_w)/2:y=260[b5];"
+    BFILTER+="[b5]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/bumper_title.txt:fontcolor=white:fontsize=36:line_spacing=8:x=(w-text_w)/2:y=347[b6];"
+    BFILTER+="[b6]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/bumper_sub.txt:fontcolor=white@0.75:fontsize=18:x=(w-text_w)/2:y=427[b7];"
     BFILTER+="[b7]fade=t=in:st=0:d=0.5,fade=t=out:st=${fade_out_start}:d=0.6[final]"
 
     ffmpeg \
@@ -190,21 +193,22 @@ run_bumper() {
     -map "[final]" \
     -map 1:a \
     -r 30 \
-    -s 1920x1080 \
+    -s 1280x720 \
     -c:v libx264 \
     -preset ultrafast \
     -tune zerolatency \
+    -threads 2 \
     -profile:v high \
-    -level 4.2 \
+    -level 4.1 \
     -pix_fmt yuv420p \
-    -b:v 6000k \
-    -maxrate 6000k \
-    -bufsize 12000k \
+    -b:v 3000k \
+    -maxrate 3000k \
+    -bufsize 6000k \
     -g 60 \
     -keyint_min 60 \
     -sc_threshold 0 \
     -c:a aac \
-    -b:a 160k \
+    -b:a 128k \
     -ar 48000 \
     -ac 2 \
     -f flv \
@@ -237,20 +241,22 @@ run_video() {
         -map "[final]" \
         -map 0:a? \
         -r 30 \
-        -s 1920x1080 \
+        -s 1280x720 \
         -c:v libx264 \
         -preset ultrafast \
+        -tune zerolatency \
+        -threads 2 \
         -profile:v high \
-        -level 4.2 \
+        -level 4.1 \
         -pix_fmt yuv420p \
-        -b:v 6000k \
-        -maxrate 6000k \
-        -bufsize 12000k \
+        -b:v 3000k \
+        -maxrate 3000k \
+        -bufsize 6000k \
         -g 60 \
         -keyint_min 60 \
         -sc_threshold 0 \
         -c:a aac \
-        -b:a 160k \
+        -b:a 128k \
         -ar 48000 \
         -ac 2 \
         -shortest \

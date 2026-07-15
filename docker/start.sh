@@ -66,10 +66,10 @@ trap 'kill "$CLOCK_PID" 2>/dev/null || true' EXIT
 #############################################
 # Static panel text
 #############################################
-printf 'S P A C E X'                     > "$ASSET_DIR/title1.txt"
-printf 'L A U N C H   M I S S I O N S'   > "$ASSET_DIR/title2.txt"
-printf "T O D A Y ' S   M I S S I O N"   > "$ASSET_DIR/header.txt"
-printf 'MISSION REPORT'                  > "$ASSET_DIR/eyebrow.txt"
+printf 'J A M E S   W E B B'              > "$ASSET_DIR/title1.txt"
+printf 'S P A C E   T E L E S C O P E'    > "$ASSET_DIR/title2.txt"
+printf "T O D A Y ' S   D I S C O V E R Y" > "$ASSET_DIR/header.txt"
+printf 'DEEP SPACE REPORT'                > "$ASSET_DIR/eyebrow.txt"
 
 #############################################
 # Load headlines from galaxy_info.txt
@@ -85,21 +85,25 @@ fi
 if [ "${#RAW_LINES[@]}" -eq 0 ]; then
     echo "WARNING: $INFO_FILE not found or empty — using default headlines."
     RAW_LINES=(
-    "Falcon 9 continues setting records with rapid rocket reusability."
-    "Starship development moves toward fully reusable spaceflight."
-    "SpaceX supports NASA missions to the International Space Station."
-    "Launch operations continue from Kennedy Space Center and Starbase."
-)
+        "Webb reveals one of the oldest galaxies ever discovered."
+        "Infrared observations uncover hidden star-forming regions."
+        "The Cartwheel Galaxy was formed after a galactic collision."
+        "Scientists continue studying the earliest galaxies in the Universe."
+    )
 fi
 
 N=${#RAW_LINES[@]}
 CYCLE=$((N * SLOT))
 echo "Loaded $N headline(s) from $INFO_FILE — rotation cycle: ${CYCLE}s"
 
-# Wrap each headline for the side panel (narrower panel at 720p -> tighter fold width)
+# Wrap each headline for the side panel.
+# NOTE: widened from 20 -> 25 chars so long headlines fold into fewer
+# lines (max ~3 instead of 4), which is what was pushing text down into
+# the progress bar / dots. Panel text column is ~280px wide at fontsize 21,
+# so 25 chars/line still fits comfortably without clipping.
 for i in "${!RAW_LINES[@]}"; do
     idx=$((i + 1))
-    echo "${RAW_LINES[$i]}" | fold -s -w 20 > "$ASSET_DIR/headline${idx}.txt"
+    echo "${RAW_LINES[$i]}" | fold -s -w 25 > "$ASSET_DIR/headline${idx}.txt"
 done
 
 # Build one long ticker string for the bottom scroll bar
@@ -121,11 +125,11 @@ if [ -f "facts.txt" ]; then
 fi
 if [ "${#FACTS[@]}" -eq 0 ]; then
     FACTS=(
-    "Falcon 9 first stages routinely land and fly multiple missions."
-    "Dragon is the first private spacecraft to carry astronauts to the ISS."
-    "Starship is the world's largest and most powerful launch vehicle."
-    "SpaceX aims to make life multiplanetary through reusable rockets."
-)
+        "Light from the Cartwheel Galaxy took 500 million years to reach us."
+        "Webb sees infrared light invisible to the human eye."
+        "A day on Venus is longer than its year."
+        "There are more stars in the universe than grains of sand on Earth."
+    )
 fi
 FACT_N=${#FACTS[@]}
 FACT_CYCLE=$((FACT_N * FACT_SLOT))
@@ -188,16 +192,20 @@ for i in "${!RAW_LINES[@]}"; do
 done
 
 # --- animated progress bar: fills across current headline's time slot -----
-CHAIN+="[${prev}]drawbox=x=33:y=313:w=280:h=2:color=white@0.15:t=fill[pg1];"
-CHAIN+="[pg1]drawbox=x=33:y=313:w='280*(mod(t\,${SLOT}))/${SLOT}':h=2:color=${GOLD}:t=fill[pg2];"
+# NOTE: moved from y=313 -> y=328 to give a 3-line wrapped headline
+# (fontsize 21, line_spacing 9 => ~90px tall block starting at y=207)
+# enough clearance before this bar starts.
+CHAIN+="[${prev}]drawbox=x=33:y=328:w=280:h=2:color=white@0.15:t=fill[pg1];"
+CHAIN+="[pg1]drawbox=x=33:y=328:w='280*(mod(t\,${SLOT}))/${SLOT}':h=2:color=${GOLD}:t=fill[pg2];"
 prev="pg2"
 
 # --- background dots (dim) -------------------------------------------------
+# NOTE: moved from y=333 -> y=348 (kept 15px below the progress bar).
 for i in "${!RAW_LINES[@]}"; do
     idx=$((i + 1))
     x=$((33 + i * 17))
     nxt="db${idx}"
-    CHAIN+="[${prev}]drawbox=x=${x}:y=333:w=7:h=7:color=white@0.3:t=fill[${nxt}];"
+    CHAIN+="[${prev}]drawbox=x=${x}:y=348:w=7:h=7:color=white@0.3:t=fill[${nxt}];"
     prev="$nxt"
 done
 
@@ -210,18 +218,20 @@ for i in "${!RAW_LINES[@]}"; do
     end=$((start + SLOT))
     ENABLE="between(mod(t\,${CYCLE})\,${start}\,${end})"
     if [ "$i" -eq "$last" ]; then
-        CHAIN+="[${prev}]drawbox=x=${x}:y=333:w=7:h=7:color=${GOLD}:t=fill:enable='${ENABLE}'[pdotend];"
+        CHAIN+="[${prev}]drawbox=x=${x}:y=348:w=7:h=7:color=${GOLD}:t=fill:enable='${ENABLE}'[pdotend];"
         prev="pdotend"
     else
         nxt="da${idx}"
-        CHAIN+="[${prev}]drawbox=x=${x}:y=333:w=7:h=7:color=${GOLD}:t=fill:enable='${ENABLE}'[${nxt}];"
+        CHAIN+="[${prev}]drawbox=x=${x}:y=348:w=7:h=7:color=${GOLD}:t=fill:enable='${ENABLE}'[${nxt}];"
         prev="$nxt"
     fi
 done
 
 # --- rotating fun fact (fills empty space, adds periodic motion) ----------
-CHAIN+="[${prev}]drawbox=x=33:y=373:w=280:h=2:color=${GOLD}@0.4:t=fill[fp1];"
-CHAIN+="[fp1]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/fact_label.txt:fontcolor=${GOLD}@0.85:fontsize=12:x=33:y=387[fp2];"
+# NOTE: whole fact block shifted down ~15px (373->388, 387->402, 407->422)
+# to match the dots moving down.
+CHAIN+="[${prev}]drawbox=x=33:y=388:w=280:h=2:color=${GOLD}@0.4:t=fill[fp1];"
+CHAIN+="[fp1]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/fact_label.txt:fontcolor=${GOLD}@0.85:fontsize=12:x=33:y=402[fp2];"
 prev="fp2"
 for i in "${!FACTS[@]}"; do
     idx=$((i + 1))
@@ -229,7 +239,7 @@ for i in "${!FACTS[@]}"; do
     end=$((start + FACT_SLOT))
     nxt="f${idx}"
     FALPHA="if(between(mod(t\,${FACT_CYCLE})\,${start}\,${end})\,if(lt(mod(t\,${FACT_CYCLE})-${start}\,0.6)\,(mod(t\,${FACT_CYCLE})-${start})/0.6\,if(gt(mod(t\,${FACT_CYCLE})-${start}\,${FACT_SLOT}-0.6)\,(${end}-mod(t\,${FACT_CYCLE}))/0.6\,1))\,0)"
-    CHAIN+="[${prev}]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/fact${idx}.txt:fontcolor=white@0.9:fontsize=16:line_spacing=7:x=33:y=407:alpha='${FALPHA}'[${nxt}];"
+    CHAIN+="[${prev}]drawtext=fontfile=${FONT}:textfile=${ASSET_DIR}/fact${idx}.txt:fontcolor=white@0.9:fontsize=16:line_spacing=7:x=33:y=422:alpha='${FALPHA}'[${nxt}];"
     prev="$nxt"
 done
 

@@ -52,6 +52,9 @@ run_video() {
         ffmpeg \
         -hide_banner \
         -loglevel info \
+        -reconnect 1 \
+        -reconnect_streamed 1 \
+        -reconnect_delay_max 5 \
         -re \
         -i "$url" \
         -loop 1 -i overlay.png \
@@ -101,17 +104,64 @@ run_video() {
 }
 
 #############################################
-# Stream loop — supports multiple video URLs
-# (comma-separated in VIDEO_URL) and loops
-# through them forever.
+# Parse VIDEO_URL
+# - Separators: commas, newlines, or both
+# - Duplicates are KEPT by default (a URL listed 3 times plays 3 times)
+# - Set DEDUPE_URLS=true to collapse duplicates into unique URLs
+# - Set SHUFFLE_URLS=false to play in exactly the order given
 #############################################
-IFS=',' read -ra URLS <<< "$VIDEO_URL"
-NUM_URLS=${#URLS[@]}
-echo "Loaded $NUM_URLS video URL(s)."
+DEDUPE_URLS="${DEDUPE_URLS:-false}"
+SHUFFLE_URLS="${SHUFFLE_URLS:-true}"
 
+URLS=()
+while IFS= read -r u; do
+    u="${u#"${u%%[![:space:]]*}"}"   # trim leading whitespace
+    u="${u%"${u##*[![:space:]]}"}"   # trim trailing whitespace
+    [ -n "$u" ] && URLS+=("$u")
+done < <(printf '%s\n' "$VIDEO_URL" | tr '\r,' '\n\n')
+
+TOTAL_LISTED=${#URLS[@]}
+
+if [ "$DEDUPE_URLS" = true ] && [ "$TOTAL_LISTED" -gt 0 ]; then
+    mapfile -t URLS < <(printf '%s\n' "${URLS[@]}" | awk '!seen[$0]++')
+fi
+
+NUM_URLS=${#URLS[@]}
+if [ "$NUM_URLS" -eq 0 ]; then
+    echo "ERROR: VIDEO_URL contained no valid entries after parsing"
+    exit 1
+fi
+echo "Parsed $TOTAL_LISTED URL(s) from VIDEO_URL -> playing $NUM_URLS (dedupe=${DEDUPE_URLS})"
+
+# Shuffle each run, but try to avoid the same URL playing back-to-back
+# (only matters when duplicates are present).
+if [ "$SHUFFLE_URLS" = true ] && [ "$NUM_URLS" -gt 1 ]; then
+    for try_n in $(seq 1 50); do
+        mapfile -t SHUFFLED < <(printf '%s\n' "${URLS[@]}" | shuf)
+        clash=false
+        for ((j = 1; j < NUM_URLS; j++)); do
+            if [ "${SHUFFLED[$j]}" = "${SHUFFLED[$((j - 1))]}" ]; then
+                clash=true
+                break
+            fi
+        done
+        [ "$clash" = false ] && break
+    done
+    URLS=("${SHUFFLED[@]}")
+    echo "Shuffled playback order for this run:"
+    for u in "${URLS[@]}"; do
+        echo "  - $u"
+    done
+fi
+
+#############################################
+# Stream loop — plays through the whole list,
+# forever.
+#############################################
 while true; do
     for ((i = 0; i < NUM_URLS; i++)); do
         url="${URLS[$i]}"
+
         run_video "$url"
 
         echo "Loading next video in 5 seconds..."

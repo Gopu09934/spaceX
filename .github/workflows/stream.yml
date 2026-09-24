@@ -67,5 +67,6 @@ jobs:
         run: |
           docker run \
             -e VIDEO_URL="${{ secrets.VIDEO_URL }}" \
+            -e AUDIO_URL="${{ secrets.AUDIO_URL }}" \
             -e YOUTUBE_STREAM_KEY="${{ secrets.YOUTUBE_STREAM_KEY }}" \
             "$IMAGE:latest"

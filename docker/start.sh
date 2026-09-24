@@ -16,7 +16,9 @@ fi
 # AUDIO_URL is optional. When set, it's a background music track (or a
 # playlist of mp3 urls) that plays under the video.
 #   MUTE_VIDEO_AUDIO=false (default) -> video's own audio is mixed with
-#                                        the background track
+#                                        the background track (falls
+#                                        back to background-only if the
+#                                        video has no audio track)
 #   MUTE_VIDEO_AUDIO=true            -> video's own audio is silenced;
 #                                        only the background track plays
 MUTE_VIDEO_AUDIO="${MUTE_VIDEO_AUDIO:-false}"
@@ -32,23 +34,14 @@ echo "========================================"
 # Simple filter: scale/pad video to 1280x720,
 # scale overlay.png to match, composite it on top.
 #
-# NOTE: overlay=...:shortest=1 is required here.
-# overlay.png is an infinitely-looping static
-# image (-loop 1), so it never reaches EOF. The
-# overlay filter's default eof_action is
-# "repeat" — once the real video (the shorter
-# input) hits EOF, the filter graph does NOT end;
-# it just keeps repeating the video's last frozen
-# frame forever, combined with the still-looping
-# overlay. That means: no more real packets for
-# -re to pace against (so encoding races ahead at
-# uncapped CPU speed), and no EOF for -shortest
-# to catch (so this ffmpeg process never exits and
-# the script never advances to the next video URL).
-# shortest=1 makes the overlay filter itself end
-# as soon as the shorter (video) input ends, which
-# is what actually lets -shortest and the rest of
-# the pipeline behave.
+# overlay=...:shortest=1 — overlay.png loops
+# forever (-loop 1), so without this the filter
+# graph never reaches EOF when the real (shorter)
+# video ends: it just repeats the video's last
+# frozen frame, -re has nothing left to pace
+# against (so encoding races ahead uncapped), and
+# -shortest never gets to trigger. shortest=1 ends
+# the filter as soon as the video input ends.
 #
 # (aloop / amix stages are appended per-video in
 # run_video() when background audio is present.)
@@ -84,6 +77,25 @@ if [ "$AUDIO_NUM" -gt 0 ]; then
     echo "Loaded $AUDIO_NUM background audio track(s) from AUDIO_URL."
 fi
 AUDIO_IDX=0   # round-robins through AUDIO_URLS, one track per video, wrapping around (looping the playlist)
+
+#############################################
+# Returns success (0) if the given video URL
+# has at least one audio stream. Used to decide
+# whether an amix stage is even possible — some
+# source clips are video-only, and [0:a] simply
+# doesn't exist for those, which used to make
+# ffmpeg fail outright ("matches no streams").
+# On probe failure (network hiccup, odd
+# container, etc.) we conservatively assume no
+# audio, since that fails safe (background-only
+# playback) rather than crashing the stream.
+#############################################
+video_has_audio() {
+    local url="$1"
+    local codec
+    codec=$(ffprobe -v error -select_streams a -show_entries stream=codec_type -of csv=p=0 "$url" 2>/dev/null || true)
+    [ -n "$codec" ]
+}
 
 #############################################
 # Stream one video with automatic retry on
@@ -124,13 +136,15 @@ run_video() {
         filter+=";[2:a]aloop=loop=-1:size=2147483647[abg]"
         if [ "$MUTE_VIDEO_AUDIO" = true ]; then
             audio_map_args=(-map "[abg]")
-        else
+        elif video_has_audio "$url"; then
             # Mix the video's own audio with the background track.
-            # Assumes the video has an audio stream (0:a) — if a given
-            # video is silent, drop MUTE_VIDEO_AUDIO to true or this
-            # mix stage will fail on that clip.
             filter+=";[0:a][abg]amix=inputs=2:duration=first:dropout_transition=2[aout]"
             audio_map_args=(-map "[aout]")
+        else
+            # Video has no audio track of its own — nothing to mix, so
+            # just stream the background track by itself.
+            echo "NOTICE: video has no audio track — using background audio alone."
+            audio_map_args=(-map "[abg]")
         fi
     else
         if [ "$MUTE_VIDEO_AUDIO" = true ]; then

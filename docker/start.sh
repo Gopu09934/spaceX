@@ -13,25 +13,77 @@ if [ -z "${YOUTUBE_STREAM_KEY:-}" ]; then
     exit 1
 fi
 
+# AUDIO_URL is optional. When set, it's a background music track (or a
+# playlist of mp3 urls) that plays under the video.
+#   MUTE_VIDEO_AUDIO=false (default) -> video's own audio is mixed with
+#                                        the background track
+#   MUTE_VIDEO_AUDIO=true            -> video's own audio is silenced;
+#                                        only the background track plays
+MUTE_VIDEO_AUDIO="${MUTE_VIDEO_AUDIO:-false}"
+
 echo "========================================"
 echo "Starting 24/7 YouTube Stream (simple overlay)"
 echo "Output Resolution : 1280x720 (720p — sized for a 2-core CI runner)"
 echo "FPS               : 30"
+echo "Mute video audio  : ${MUTE_VIDEO_AUDIO}"
 echo "========================================"
 
 #############################################
 # Simple filter: scale/pad video to 1280x720,
 # scale overlay.png to match, composite it on top.
+#
+# NOTE: overlay=...:shortest=1 is required here.
+# overlay.png is an infinitely-looping static
+# image (-loop 1), so it never reaches EOF. The
+# overlay filter's default eof_action is
+# "repeat" — once the real video (the shorter
+# input) hits EOF, the filter graph does NOT end;
+# it just keeps repeating the video's last frozen
+# frame forever, combined with the still-looping
+# overlay. That means: no more real packets for
+# -re to pace against (so encoding races ahead at
+# uncapped CPU speed), and no EOF for -shortest
+# to catch (so this ffmpeg process never exits and
+# the script never advances to the next video URL).
+# shortest=1 makes the overlay filter itself end
+# as soon as the shorter (video) input ends, which
+# is what actually lets -shortest and the rest of
+# the pipeline behave.
+#
+# (aloop / amix stages are appended per-video in
+# run_video() when background audio is present.)
 #############################################
-FILTER="[0:v]scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2:black[video];"
-FILTER+="[1:v]scale=1280:720:flags=fast_bilinear[ovl];"
-FILTER+="[video][ovl]overlay=0:0[final]"
+BASE_FILTER="[0:v]scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2:black[video];"
+BASE_FILTER+="[1:v]scale=1280:720:flags=fast_bilinear[ovl];"
+BASE_FILTER+="[video][ovl]overlay=0:0:shortest=1[final]"
 
 #############################################
 # Auto-restart on failure
 #############################################
 MAX_RETRIES=5       # per-video retry attempts before moving on
 RETRY_DELAY=5        # seconds between retries
+
+#############################################
+# Parse AUDIO_URL into a playlist (same
+# comma/newline parsing as VIDEO_URL below).
+# Optional — if unset, no background track is
+# added and video audio passes through as-is
+# (unless MUTE_VIDEO_AUDIO=true, which silences
+# it and outputs silence instead).
+#############################################
+AUDIO_URLS=()
+if [ -n "${AUDIO_URL:-}" ]; then
+    while IFS= read -r a; do
+        a="${a#"${a%%[![:space:]]*}"}"
+        a="${a%"${a##*[![:space:]]}"}"
+        [ -n "$a" ] && AUDIO_URLS+=("$a")
+    done < <(printf '%s\n' "$AUDIO_URL" | tr '\r,' '\n\n')
+fi
+AUDIO_NUM=${#AUDIO_URLS[@]}
+if [ "$AUDIO_NUM" -gt 0 ]; then
+    echo "Loaded $AUDIO_NUM background audio track(s) from AUDIO_URL."
+fi
+AUDIO_IDX=0   # round-robins through AUDIO_URLS, one track per video, wrapping around (looping the playlist)
 
 #############################################
 # Stream one video with automatic retry on
@@ -41,6 +93,56 @@ RETRY_DELAY=5        # seconds between retries
 run_video() {
     local url="$1"
     local attempt=1
+
+    #########################################
+    # Pick this video's background audio track
+    # (if any) and build the extra ffmpeg input
+    # / map / filter args for it. Input index 2
+    # is always the audio input, whenever one is
+    # present (either a real track or a
+    # synthesized silent one for the mute-with-
+    # no-AUDIO_URL case).
+    #
+    # Audio looping is done with the aloop
+    # *filter* (on the decoded stream), not
+    # -stream_loop on the input, since -stream_loop
+    # combined with -re on the video input broke
+    # real-time pacing.
+    #########################################
+    local filter="$BASE_FILTER"
+    local audio_input_args=()
+    local audio_map_args=()
+
+    if [ "$AUDIO_NUM" -gt 0 ]; then
+        local audio_url="${AUDIO_URLS[$((AUDIO_IDX % AUDIO_NUM))]}"
+        AUDIO_IDX=$((AUDIO_IDX + 1))
+        echo "Background audio: $audio_url"
+        audio_input_args=(-i "$audio_url")
+        # size is a sample-count ceiling, not a target — with any real
+        # mp3 (well under ~12 hours of samples at 48kHz) this just loops
+        # the whole track indefinitely.
+        filter+=";[2:a]aloop=loop=-1:size=2147483647[abg]"
+        if [ "$MUTE_VIDEO_AUDIO" = true ]; then
+            audio_map_args=(-map "[abg]")
+        else
+            # Mix the video's own audio with the background track.
+            # Assumes the video has an audio stream (0:a) — if a given
+            # video is silent, drop MUTE_VIDEO_AUDIO to true or this
+            # mix stage will fail on that clip.
+            filter+=";[0:a][abg]amix=inputs=2:duration=first:dropout_transition=2[aout]"
+            audio_map_args=(-map "[aout]")
+        fi
+    else
+        if [ "$MUTE_VIDEO_AUDIO" = true ]; then
+            # No AUDIO_URL given but muting was requested — output
+            # silence instead of the video's own audio. anullsrc is
+            # already an infinite generator, so no looping is needed.
+            audio_input_args=(-f lavfi -i "anullsrc=r=48000:cl=stereo")
+            audio_map_args=(-map 2:a)
+        else
+            audio_map_args=(-map 0:a?)
+        fi
+    fi
 
     while [ "$attempt" -le "$MAX_RETRIES" ]; do
         echo "----------------------------------------"
@@ -58,9 +160,10 @@ run_video() {
         -re \
         -i "$url" \
         -loop 1 -i overlay.png \
-        -filter_complex "$FILTER" \
+        "${audio_input_args[@]}" \
+        -filter_complex "$filter" \
         -map "[final]" \
-        -map 0:a? \
+        "${audio_map_args[@]}" \
         -r 30 \
         -s 1280x720 \
         -c:v libx264 \

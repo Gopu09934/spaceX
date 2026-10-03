@@ -2,29 +2,23 @@
 set -euo pipefail
 
 #############################################
-# 24/7 YouTube stream - independent pipelines
+# 24/7 YouTube stream (video + its own audio)
 #
-#   [video feeder]  loops VIDEO_URL list forever  -> FIFO (mpegts, h264) --+
-#                                                                          +--> [publisher] -> YouTube RTMP
-#   [audio feeder]  loops AUDIO_URL list forever  -> FIFO (raw PCM)     ---+
+#   [video feeder]  loops VIDEO_URL list forever -> FIFO (mpegts: h264 + aac)
+#                                                       |
+#                                                  [publisher] -> YouTube RTMP
 #
-# - Video and audio never depend on each other.
-# - If a video URL fails, a black+overlay slate is streamed and the loop
-#   moves on. Audio keeps playing.
-# - If an audio URL fails/is slow/is unset, silence is streamed and video
-#   keeps playing. Downloaded tracks loop gap-free from local disk.
+# - Each video's OWN audio is streamed.
+# - If a video has no audio track, silence is added for that clip.
+# - If a video URL fails, a black+overlay slate (with silence) is streamed
+#   and the loop moves on.
 # - The RTMP connection is held by ONE long-running ffmpeg (no reconnect
 #   between clips).
 #
 # Env:
 #   VIDEO_URL           required, comma/newline separated list
 #   YOUTUBE_STREAM_KEY  required
-#   AUDIO_URL           optional, comma/newline separated list (mp3 etc.)
-#                       unset -> silent audio track
-#   DEDUPE_URLS=false   SHUFFLE_URLS=true   (video list only)
-#
-# NOTE: the video files' own audio is intentionally NOT used, so that audio
-# is 100% independent. All sound comes from AUDIO_URL.
+#   DEDUPE_URLS=false   SHUFFLE_URLS=true
 #############################################
 
 if [ -z "${VIDEO_URL:-}" ]; then echo "ERROR: VIDEO_URL is not set"; exit 1; fi
@@ -36,7 +30,7 @@ SHUFFLE_URLS="${SHUFFLE_URLS:-true}"
 RETRY_DELAY=5
 
 echo "========================================"
-echo "Starting 24/7 YouTube Stream (independent audio/video)"
+echo "Starting 24/7 YouTube Stream (video + its own audio)"
 echo "Output : 1280x720 @ 30fps, 3000k video, 128k AAC"
 echo "========================================"
 
@@ -55,10 +49,8 @@ kill_tree() {
 }
 
 WORKDIR="$(mktemp -d)"
-VFIFO="$WORKDIR/video.ts"
-AFIFO="$WORKDIR/audio.pcm"
-mkdir -p "$WORKDIR/audio"
-mkfifo "$VFIFO" "$AFIFO"
+STREAM_FIFO="$WORKDIR/stream.ts"
+mkfifo "$STREAM_FIFO"
 
 PIDS=()
 cleanup() {
@@ -68,32 +60,39 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-# Hold both FIFOs open read+write for the whole run. This means:
-#  - feeders never get EPIPE / the publisher never gets EOF when a feeder
-#    restarts an ffmpeg process
+# Hold the FIFO open read+write for the whole run so that:
+#  - the feeder never gets EPIPE / the publisher never gets EOF when a
+#    clip's ffmpeg process ends
 #  - opening never blocks
-exec 3<>"$VFIFO" 4<>"$AFIFO"
+exec 3<>"$STREAM_FIFO"
 
-flush_fifo() {   # drop stale bytes after a publisher restart (keeps alignment)
-    local f="$1" n
+flush_fifo() {   # drop stale bytes after a publisher restart
+    local n
     for n in 1 2 3 4; do
-        dd if="$f" of=/dev/null bs=64k iflag=nonblock 2>/dev/null || true
+        dd if="$STREAM_FIFO" of=/dev/null bs=64k iflag=nonblock 2>/dev/null || true
     done
 }
 
 #############################################
-# VIDEO pipeline
+# Encoder settings
 #############################################
-BASE_FILTER="[0:v]scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2:black[video];"
-BASE_FILTER+="[1:v]scale=1280:720:flags=fast_bilinear[ovl];"
-BASE_FILTER+="[video][ovl]overlay=0:0:shortest=1[final]"
+VIDEO_GRAPH="[0:v]scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2:black[video];"
+VIDEO_GRAPH+="[1:v]scale=1280:720:flags=fast_bilinear[ovl];"
+VIDEO_GRAPH+="[video][ovl]overlay=0:0:shortest=1[final]"
 
-VENC=(-r 30 -c:v libx264 -preset ultrafast -tune zerolatency -threads 2
-      -profile:v high -level 4.1 -pix_fmt yuv420p
-      -b:v 3000k -maxrate 3000k -bufsize 6000k
-      -g 60 -keyint_min 60 -sc_threshold 0
-      -an -f mpegts -flush_packets 1 pipe:1)
+# clip has audio: resample/normalize its own audio inside the same graph
+GRAPH_WITH_AUDIO="${VIDEO_GRAPH};[0:a:0]aresample=48000:async=1,aformat=channel_layouts=stereo[aout]"
 
+OUT_ENC=(-r 30 -c:v libx264 -preset ultrafast -tune zerolatency -threads 2
+         -profile:v high -level 4.1 -pix_fmt yuv420p
+         -b:v 3000k -maxrate 3000k -bufsize 6000k
+         -g 60 -keyint_min 60 -sc_threshold 0
+         -c:a aac -b:a 128k -ar 48000 -ac 2
+         -f mpegts -flush_packets 1 pipe:1)
+
+#############################################
+# URL list
+#############################################
 mapfile -t URLS < <(parse_list "$VIDEO_URL")
 TOTAL_LISTED=${#URLS[@]}
 if [ "$DEDUPE_URLS" = true ] && [ "$TOTAL_LISTED" -gt 0 ]; then
@@ -123,15 +122,29 @@ shuffle_urls() {   # reshuffle each pass; avoid back-to-back repeats
     URLS=("${S[@]}")
 }
 
-video_slate() {   # keeps video flowing while a URL is failing
+has_audio() {   # $1=url ; true if the file has an audio stream
+    local out
+    out="$(ffprobe -v error -select_streams a:0 -show_entries stream=codec_type \
+            -of csv=p=0 "$1" 2>/dev/null || true)"
+    [ -n "$out" ]
+}
+
+#############################################
+# Slate: keeps video+audio flowing while a URL is failing
+#############################################
+video_slate() {
     ffmpeg -hide_banner -loglevel error -nostdin -re \
         -f lavfi -i "color=c=black:s=1280x720:r=30:d=${RETRY_DELAY}" \
         -loop 1 -framerate 30 -i overlay.png \
+        -f lavfi -i "anullsrc=r=48000:cl=stereo" \
         -filter_complex "[1:v]scale=1280:720:flags=fast_bilinear[ovl];[0:v][ovl]overlay=0:0:shortest=1[final]" \
-        -map "[final]" "${VENC[@]}" >&3 || true
+        -map "[final]" -map 2:a -t "$RETRY_DELAY" "${OUT_ENC[@]}" >&3 || true
 }
 
-video_feeder() {   # loops the video list forever
+#############################################
+# Video feeder: loops the list forever
+#############################################
+video_feeder() {
     local url rc started
     while true; do
         shuffle_urls
@@ -140,12 +153,25 @@ video_feeder() {   # loops the video list forever
             echo "[video] playing: $url"
             started=$SECONDS
             rc=0
-            ffmpeg -hide_banner -loglevel warning -nostdin \
-                -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 \
-                -re -i "$url" \
-                -loop 1 -framerate 30 -i overlay.png \
-                -filter_complex "$BASE_FILTER" \
-                -map "[final]" "${VENC[@]}" >&3 || rc=$?
+            if has_audio "$url"; then
+                ffmpeg -hide_banner -loglevel warning -nostdin \
+                    -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 \
+                    -re -i "$url" \
+                    -loop 1 -framerate 30 -i overlay.png \
+                    -filter_complex "$GRAPH_WITH_AUDIO" \
+                    -map "[final]" -map "[aout]" \
+                    "${OUT_ENC[@]}" >&3 || rc=$?
+            else
+                echo "[video] no audio track in this clip - adding silence"
+                ffmpeg -hide_banner -loglevel warning -nostdin \
+                    -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 \
+                    -re -i "$url" \
+                    -loop 1 -framerate 30 -i overlay.png \
+                    -f lavfi -i "anullsrc=r=48000:cl=stereo" \
+                    -filter_complex "$VIDEO_GRAPH" \
+                    -map "[final]" -map 2:a -shortest \
+                    "${OUT_ENC[@]}" >&3 || rc=$?
+            fi
             if [ "$rc" -ne 0 ] || [ $((SECONDS - started)) -lt 2 ]; then
                 echo "[video] WARNING: '$url' failed/ended instantly (rc=$rc) - slate for ${RETRY_DELAY}s, then next"
                 video_slate
@@ -154,73 +180,11 @@ video_feeder() {   # loops the video list forever
     done
 }
 
-#############################################
-# AUDIO pipeline
-#
-# Each track is downloaded once (in the background, with endless retry)
-# and converted to raw 48k stereo PCM on local disk. The feeder cats all
-# finished tracks in an endless loop -> gap-free looping, no network
-# dependency after download. Until a track is ready (or if none is
-# configured / all fail) it emits silence, so the publisher never waits.
-# 192000 bytes = 1 second of s16le 48kHz stereo.
-#############################################
-mapfile -t AUDIO_URLS < <(parse_list "${AUDIO_URL:-}")
-AUDIO_NUM=${#AUDIO_URLS[@]}
-if [ "$AUDIO_NUM" -gt 0 ]; then
-    echo "Loaded $AUDIO_NUM background audio track(s) from AUDIO_URL (looped forever)."
-else
-    echo "AUDIO_URL not set - streaming silent audio."
-fi
-
-audio_fetch() {   # $1=index $2=url ; retries until it succeeds
-    local idx="$1" url="$2" out
-    out="$WORKDIR/audio/track_$(printf '%03d' "$idx").raw"
-    until ffmpeg -hide_banner -loglevel error -nostdin -y \
-            -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 \
-            -i "$url" -vn -f s16le -ar 48000 -ac 2 "$out.part"; do
-        echo "[audio] WARNING: download failed for $url - retrying in ${RETRY_DELAY}s"
-        sleep "$RETRY_DELAY"
-    done
-    mv "$out.part" "$out"
-    echo "[audio] ready: $url"
-}
-
-audio_feeder() {
-    while true; do
-        {
-            local files
-            while true; do
-                files=("$WORKDIR"/audio/track_*.raw)
-                if [ -e "${files[0]}" ]; then
-                    cat "${files[@]}"
-                else
-                    head -c 192000 /dev/zero
-                fi
-            done
-        } | ffmpeg -hide_banner -loglevel error \
-                -re -f s16le -ar 48000 -ac 2 -i pipe:0 \
-                -c:a copy -f s16le pipe:1 >&4 || true
-        echo "[audio] feeder restarted"
-        sleep 1
-    done
-}
-
-#############################################
-# Start feeders (independent background jobs)
-#############################################
-i=0
-for a in "${AUDIO_URLS[@]}"; do
-    audio_fetch "$i" "$a" &
-    PIDS+=("$!")
-    i=$((i + 1))
-done
-
 video_feeder & PIDS+=("$!")
-audio_feeder & PIDS+=("$!")
 
 #############################################
 # Publisher: ONE long-running ffmpeg to YouTube.
-# Video is copied (already encoded by the feeder), audio is AAC-encoded.
+# Video and audio are already encoded by the feeder, so just copy.
 # Restarts forever if the RTMP link drops.
 #############################################
 while true; do
@@ -229,16 +193,13 @@ while true; do
     echo "----------------------------------------"
     set +e
     ffmpeg -hide_banner -loglevel info -nostdin \
-        -thread_queue_size 1024 -f mpegts -i "$VFIFO" \
-        -thread_queue_size 1024 -f s16le -ar 48000 -ac 2 -i "$AFIFO" \
-        -map 0:v:0 -map 1:a:0 \
-        -c:v copy \
-        -c:a aac -b:a 128k -ar 48000 -ac 2 \
+        -thread_queue_size 1024 -f mpegts -i "$STREAM_FIFO" \
+        -map 0:v:0 -map 0:a:0 \
+        -c copy \
         -f flv "rtmp://a.rtmp.youtube.com/live2/${YOUTUBE_STREAM_KEY}"
     rc=$?
     set -e
     echo "WARNING: publisher ffmpeg exited (code ${rc}). Reconnecting in ${RETRY_DELAY}s..."
     sleep "$RETRY_DELAY"
-    flush_fifo "$VFIFO"
-    flush_fifo "$AFIFO"
+    flush_fifo
 done

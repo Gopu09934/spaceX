@@ -10,7 +10,7 @@ set -euo pipefail
 #
 # - Each video's OWN audio is streamed.
 # - If a video has no audio track, silence is added for that clip.
-# - If a video URL fails, a black+overlay slate (with silence) is streamed
+# - If a video URL fails, a black slate (with silence) is streamed
 #   and the loop moves on.
 # - The RTMP connection is held by ONE long-running ffmpeg (no reconnect
 #   between clips).
@@ -23,7 +23,6 @@ set -euo pipefail
 
 if [ -z "${VIDEO_URL:-}" ]; then echo "ERROR: VIDEO_URL is not set"; exit 1; fi
 if [ -z "${YOUTUBE_STREAM_KEY:-}" ]; then echo "ERROR: YOUTUBE_STREAM_KEY is not set"; exit 1; fi
-if [ ! -f overlay.png ]; then echo "ERROR: overlay.png not found in $(pwd)"; exit 1; fi
 
 DEDUPE_URLS="${DEDUPE_URLS:-false}"
 SHUFFLE_URLS="${SHUFFLE_URLS:-true}"
@@ -76,12 +75,8 @@ flush_fifo() {   # drop stale bytes after a publisher restart
 #############################################
 # Encoder settings
 #############################################
-VIDEO_GRAPH="[0:v]scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2:black[video];"
-VIDEO_GRAPH+="[1:v]scale=1280:720:flags=fast_bilinear[ovl];"
-VIDEO_GRAPH+="[video][ovl]overlay=0:0:shortest=1[final]"
-
-# clip has audio: resample/normalize its own audio inside the same graph
-GRAPH_WITH_AUDIO="${VIDEO_GRAPH};[0:a:0]aresample=48000:async=1,aformat=channel_layouts=stereo[aout]"
+VF="scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2:black"
+AF="aresample=48000:async=1,aformat=channel_layouts=stereo"
 
 OUT_ENC=(-r 30 -c:v libx264 -preset ultrafast -tune zerolatency -threads 2
          -profile:v high -level 4.1 -pix_fmt yuv420p
@@ -135,10 +130,8 @@ has_audio() {   # $1=url ; true if the file has an audio stream
 video_slate() {
     ffmpeg -hide_banner -loglevel error -nostdin -re \
         -f lavfi -i "color=c=black:s=1280x720:r=30:d=${RETRY_DELAY}" \
-        -loop 1 -framerate 30 -i overlay.png \
         -f lavfi -i "anullsrc=r=48000:cl=stereo" \
-        -filter_complex "[1:v]scale=1280:720:flags=fast_bilinear[ovl];[0:v][ovl]overlay=0:0:shortest=1[final]" \
-        -map "[final]" -map 2:a -t "$RETRY_DELAY" "${OUT_ENC[@]}" >&3 || true
+        -map 0:v -map 1:a -t "$RETRY_DELAY" "${OUT_ENC[@]}" >&3 || true
 }
 
 #############################################
@@ -157,19 +150,15 @@ video_feeder() {
                 ffmpeg -hide_banner -loglevel warning -nostdin \
                     -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 \
                     -re -i "$url" \
-                    -loop 1 -framerate 30 -i overlay.png \
-                    -filter_complex "$GRAPH_WITH_AUDIO" \
-                    -map "[final]" -map "[aout]" \
+                    -map 0:v:0 -map 0:a:0 -vf "$VF" -af "$AF" \
                     "${OUT_ENC[@]}" >&3 || rc=$?
             else
                 echo "[video] no audio track in this clip - adding silence"
                 ffmpeg -hide_banner -loglevel warning -nostdin \
                     -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 \
                     -re -i "$url" \
-                    -loop 1 -framerate 30 -i overlay.png \
                     -f lavfi -i "anullsrc=r=48000:cl=stereo" \
-                    -filter_complex "$VIDEO_GRAPH" \
-                    -map "[final]" -map 2:a -shortest \
+                    -map 0:v:0 -map 1:a -vf "$VF" -shortest \
                     "${OUT_ENC[@]}" >&3 || rc=$?
             fi
             if [ "$rc" -ne 0 ] || [ $((SECONDS - started)) -lt 2 ]; then
